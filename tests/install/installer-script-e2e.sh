@@ -398,6 +398,32 @@ ok "serve.git main = $TARGET_SHA"
 
 step "updating via $UPDATE_METHOD"
 
+# PROBE (not for merge): who takes the update lock during the HEAD install.
+PROBE_DIR="$LOG_DIR/probe"
+probe_snapshot() {
+  {
+    printf '=== %s\n' "$(date -u +%H:%M:%S)"
+    ps -axww -o pid=,ppid=,lstart=,command= 2>/dev/null | grep -E 'python|hermes|node|pnpm|launchd_wrap|bash' | grep -v ' grep ' || true
+    for f in "$HERMES_HOME"/.update* "$HERMES_HOME"/*.lock "$HERMES_HOME"/installs/*/*pending* "$HERMES_HOME"/installs/*/*.json; do
+      [ -f "$f" ] && { printf -- '--- %s\n' "$f"; head -c 2000 "$f"; printf '\n'; }
+    done
+  } >> "$PROBE_DIR/ps.log" 2>&1
+}
+probe_collect() {
+  [ -n "${PROBE_PID:-}" ] && kill "$PROBE_PID" 2>/dev/null || true
+  [ -d "$PROBE_DIR" ] || return 0
+  probe_snapshot
+  cp -R "$HERMES_HOME/logs" "$PROBE_DIR/hermes-logs" 2>/dev/null || true
+  ls -la "$HERMES_HOME" > "$PROBE_DIR/home-ls.txt" 2>&1 || true
+  launchctl list 2>/dev/null | grep -i hermes > "$PROBE_DIR/launchctl.txt" 2>&1 || true
+}
+probe_start() {
+  mkdir -p "$PROBE_DIR"
+  trap 'probe_collect; mock_stop' EXIT
+  ( while :; do probe_snapshot; sleep 1; done ) &
+  PROBE_PID=$!
+}
+
 # Install-side state capture, callable from inside the update branches: on
 # app-update legs the updater's transcript is streamed into the app UI (or runs
 # detached) and is otherwise lost, so snapshot every place it also lands --
@@ -436,10 +462,12 @@ case "$UPDATE_METHOD" in
     ;;
   installer-script)
     # A user re-running the one-liner today gets the CURRENT script.
+    probe_start
     source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$TARGET_SHA" "$TARGET_LABEL"
     ;;
   installer-script+desktop)
     EXPECT_DESKTOP=present
+    probe_start
     source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$TARGET_SHA" "$TARGET_LABEL" desktop
     assert_desktop_artifact "$TARGET_LABEL"
     ;;
